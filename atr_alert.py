@@ -2,17 +2,22 @@ import json
 import os
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 PAIR = os.getenv("COINDCX_PAIR", "B-BTC_USDT")
 INTERVAL = os.getenv("CANDLE_INTERVAL", "15m")
 
-ATR_LENGTH = 14
-ATR_MULTIPLIER = 1.2
+# শুধু Condition 2 ব্যবহার করা হবে
 MIN_BODY_PERCENT = 60.0
 
 STATE_FILE = "alert_state.json"
+
+# India Standard Time: UTC + 5:30
+IST = timezone(
+    timedelta(hours=5, minutes=30),
+    name="GMT+05:30"
+)
 
 
 def get_json(url):
@@ -87,46 +92,6 @@ def get_candles():
     return candles
 
 
-def calculate_true_range(current_candle, previous_candle):
-    high_low = current_candle["high"] - current_candle["low"]
-
-    high_previous_close = abs(
-        current_candle["high"] - previous_candle["close"]
-    )
-
-    low_previous_close = abs(
-        current_candle["low"] - previous_candle["close"]
-    )
-
-    return max(
-        high_low,
-        high_previous_close,
-        low_previous_close
-    )
-
-
-def calculate_atr(candles, candle_index):
-    first_index = candle_index - ATR_LENGTH + 1
-
-    if first_index < 1:
-        return None
-
-    true_ranges = []
-
-    for index in range(first_index, candle_index + 1):
-        current_candle = candles[index]
-        previous_candle = candles[index - 1]
-
-        current_true_range = calculate_true_range(
-            current_candle,
-            previous_candle
-        )
-
-        true_ranges.append(current_true_range)
-
-    return sum(true_ranges) / len(true_ranges)
-
-
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
@@ -186,33 +151,25 @@ def send_telegram(message):
 
 
 def main():
-    print("ATR alert bot শুরু হয়েছে")
+    print("Body/Range alert bot শুরু হয়েছে")
     print(f"Pair: {PAIR}")
     print(f"Interval: {INTERVAL}")
+    print("Timezone: GMT+05:30")
+    print("Active condition: Body/Range >= 60%")
 
     candles = get_candles()
 
     print(f"মোট candle পাওয়া গেছে: {len(candles)}")
 
-    minimum_candles = ATR_LENGTH + 2
-
-    if len(candles) < minimum_candles:
-        raise RuntimeError(
-            f"কমপক্ষে {minimum_candles}টি candle দরকার, "
-            f"পাওয়া গেছে {len(candles)}টি"
-        )
-
     # শেষ candleটি চলমান হতে পারে।
     # তাই তার আগের candle ব্যবহার করা হচ্ছে।
+    if len(candles) < 2:
+        raise RuntimeError(
+            "কমপক্ষে 2টি candle দরকার"
+        )
+
     candle_index = len(candles) - 2
     candle = candles[candle_index]
-
-    atr_value = calculate_atr(candles, candle_index)
-
-    if atr_value is None:
-        raise RuntimeError(
-            "ATR(14) হিসাব করা যায়নি"
-        )
 
     body = abs(candle["close"] - candle["open"])
     candle_range = candle["high"] - candle["low"]
@@ -223,22 +180,22 @@ def main():
 
     body_percent = (body / candle_range) * 100
 
-    condition_1 = body >= ATR_MULTIPLIER * atr_value
+    # শুধু Condition 2
     condition_2 = body_percent >= MIN_BODY_PERCENT
 
     print(f"Body: {body}")
-    print(f"ATR(14): {atr_value}")
-    print(f"1.2 × ATR: {ATR_MULTIPLIER * atr_value}")
+    print(f"High - Low: {candle_range}")
     print(f"Body/Range: {body_percent:.2f}%")
-    print(f"Condition 1: {condition_1}")
     print(f"Condition 2: {condition_2}")
 
     state = load_state()
-
     candle_id = str(candle["time"])
 
-    if not condition_1 or not condition_2:
-        print("এই candle signal-এর শর্ত পূরণ করেনি।")
+    if not condition_2:
+        print(
+            "Body/Range 60%-এর কম। "
+            "এই candle signal-এর শর্ত পূরণ করেনি।"
+        )
 
         state["last_checked_candle"] = candle_id
         save_state(state)
@@ -257,12 +214,18 @@ def main():
         print("Doji candle। কোনো signal নেই।")
         return
 
-    candle_time_text = datetime.fromtimestamp(
+    candle_time = datetime.fromtimestamp(
         candle["time"] / 1000,
         tz=timezone.utc
-    ).strftime("%Y-%m-%d %H:%M UTC")
+    )
 
-    message = f"""🚨 {direction} ATR BODY SIGNAL
+    candle_time_ist = candle_time.astimezone(IST)
+
+    candle_time_text = candle_time_ist.strftime(
+        "%Y-%m-%d %H:%M:%S GMT+05:30"
+    )
+
+    message = f"""🚨 {direction} BODY/RANGE SIGNAL
 
 Pair: {PAIR}
 Timeframe: {INTERVAL}
@@ -274,12 +237,11 @@ Low: {candle["low"]}
 Close: {candle["close"]}
 
 Body: {body:.6f}
-ATR(14): {atr_value:.6f}
-1.2 × ATR: {ATR_MULTIPLIER * atr_value:.6f}
+High - Low: {candle_range:.6f}
 Body/Range: {body_percent:.2f}%
 
-Condition 1: ✅
-Condition 2: ✅
+Condition 2:
+Body / (High - Low) >= 60% ✅
 """
 
     send_telegram(message)
