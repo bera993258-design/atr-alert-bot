@@ -1,0 +1,42 @@
+name: ATR Body Alert
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  atr-alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run ATR alert bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COINDCX_PAIR: "B-BTC_USDT"
+          CANDLE_INTERVAL: "15m"
+        run: |
+          python atr_alert.py
+
+      - name: Save alert state
+        if: always()
+        run: |
+          if [ -f alert_state.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add alert_state.json
+            git diff --cached --quiet || git commit -m "Update alert state"
+            git push
+          fi
